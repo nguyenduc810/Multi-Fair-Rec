@@ -8,8 +8,6 @@ import torch.nn.functional as F
 #     import torch.cuda as T
 # else:
 #     import torch as T
-
-
 class MatrixFactorization(nn.Module):
     def __init__(self, num_users, num_items, args):
         super(MatrixFactorization, self).__init__()

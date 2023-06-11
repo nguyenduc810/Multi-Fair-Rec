@@ -11,6 +11,8 @@ class SmoothRank(torch.nn.Module):
         self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, scores_max_relevant, scores):
+       # This code is implementing the SmoothRank algorithm, which is a differentiable approximation
+       # of the rank loss used in learning-to-rank problems.
         x_0 = scores_max_relevant.unsqueeze(dim=-1)
         x_1 = scores.unsqueeze(dim=-2)
         diff = x_1 - x_0

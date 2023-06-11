@@ -8,6 +8,7 @@ import sys
 import time
 from argparse import ArgumentParser
 from model.mf import MatrixFactorization
+from model.MLP import MLP
 from SoftRank import SmoothDCGLoss, SmoothRank
 from sampler import NegSampler, negsamp_vectorized_bsearch_preverif
 from min_norm_solvers import MinNormSolver, gradient_normalizers
@@ -33,6 +34,7 @@ def parse_args():
     parser.add_argument('--data', type=str, default='ml-100k', choices=['ml-100k', 'ml-1m', 'lastfm'],
                         help="File path for data")
     parser.add_argument('--gpu_id', type=int, default=0)
+    parser.add_argument('--pretrain',type = int, default=0, choices=[0,1])
     # Preprocessing
     parser.add_argument('--val_ratio', type=float, default=0.1, help="Proportion of validation set")
     parser.add_argument('--test_ratio', type=float, default=0.2, help="Proportion of testing set")
@@ -42,17 +44,19 @@ def parse_args():
     parser.add_argument('--temp', type=float, default=1e-5, help="temperature. how soft the ranks to be")
     parser.add_argument('--mode', type=str, default='r', help="which loss to use")
     # Optimizer
-    parser.add_argument('--lr', type=float, default=5e-4, help="Learning rate")
+    parser.add_argument('--lr', type=float, default=5e-3, help="Learning rate")
     parser.add_argument('--weight_decay', type=float, default=1e-3, help="Weight decay factor")
     # Training
-    parser.add_argument('--n_epochs', type=int, default=300, help="Number of epoch during training")
-    parser.add_argument('--every', type=int, default=300, help="Period for evaluating during training")
+    parser.add_argument('--n_epochs', type=int, default=200, help="Number of epoch during training")
+    parser.add_argument('--every', type=int, default=20, help="Period for evaluating during training")
     # parser.add_argument('--patience', type=int, default=50, help="patience for early stopping")
     # MOOP
     parser.add_argument('--moop', type=int, default=0, choices=[0, 1])
     parser.add_argument('--type', type=str, default='loss+', choices=['l2', 'loss', 'loss+', 'none'])
     # Hard setting
-    parser.add_argument('--scale1', type=float, default=1, help="hard setting scale on obj1")
+    parser.add_argument('--scale1', type=float, default=0.55, help="hard setting scale on obj1")
+    parser.add_argument('--scale2', type=float, default=0.45, help="hard setting scale on obj2")
+    parser.add_argument('--scale3', type=float, default=0.45, help="hard setting scale on obj3")
 
     return parser.parse_args()
 
@@ -122,11 +126,32 @@ def neg_item_pre_sampling(train_matrix, num_neg_candidates=500):
     return user_neg_items
 
 def statistics_occurrence(top_id, popular_dict):
+    """
+    The function calculates the occurrence of popular and individual items in a given dictionary for
+    different values of k.
+    
+    :param top_id: It is a numpy array containing the top k recommended item IDs for each user. The
+    shape of the array is (number of users, k)
+    :param popular_dict: A dictionary where the keys are movie IDs and the values are the number of
+    times that movie has been watched or rated by users
+    :return: two lists: pop_occurrence and ind_occurrence. pop_occurrence contains the number of
+    occurrences of each genre in the top k most popular movies, for k = 5, 10, 15, and 20.
+    ind_occurrence contains the number of occurrences of each movie in the top k recommended movies, for
+    k = 5, 10, 15, and
+    """
     pop_occurrence = []
     ind_occurrence = []
     for k in [5, 10, 15, 20]:
+        # The above code is merging the first k elements of each row in a 2D numpy array `top_id` into
+        # a single list using the `itertools.chain()` function and storing the result in the variable
+        # `merged_id`.
         merged_id = list(itertools.chain(*top_id[:, :k]))
         pop_flat = list((pd.Series(merged_id)).map(popular_dict))
+# The above code is counting the frequency of each element in the list `pop_flat` using the `Counter`
+# function from the `collections` module. It then sorts the resulting dictionary in descending order
+# of frequency using the `most_common()` method and sorts the tuples in ascending order of the element
+# using the `key` parameter and a lambda function. The sorted list of tuples is assigned to the
+# variable `count_genre`.
         count_genre = sorted(Counter(pop_flat).most_common(), key=lambda tup: tup[0])
         pop_occurrence.append([x[1] for x in count_genre])
 
@@ -146,8 +171,11 @@ def train(args):
     gender_label = np.zeros(len(index_F) + len(index_M))
     for ind in index_F:
         gender_label[ind] = 1
-
-    model = MatrixFactorization(user_size, item_size, args)
+    
+    #model = MatrixFactorization(user_size, item_size, args)
+    model = MLP(user_size, item_size)
+    if args.pretrain == 1:
+      model.load_state_dict(torch.load('/weight/weight_rui_moop.pt'))
     optimizer = torch.optim.Adam(model.myparameters, lr=args.lr, weight_decay=args.weight_decay)
 
     dcg_loss = SmoothDCGLoss(args=args, topk=50, temp=args.temp)
@@ -201,6 +229,11 @@ def train(args):
     sampled_ids = np.ones((user_size, max_pos)) * item_size
     labels = np.zeros((user_size, max_pos))
 
+# The above code is filling a 2D numpy array `sampled_ids` with positive and negative IDs based on the
+# length of `pos_ids_list` and `neg_ids_list`. It is also filling a 2D numpy array `labels` with 1s
+# for the positive IDs and 0s for the negative IDs. The loop iterates `user_size` times and for each
+# iteration, it fills the corresponding row of `sampled_ids` and `labels` with the positive IDs first,
+# followed by the negative IDs.
     for i in range(user_size):
         sampled_ids[i][:len(pos_ids_list[i])] = np.array(pos_ids_list[i])
         sampled_ids[i][len(pos_ids_list[i]):] = neg_ids_list[i]
@@ -233,7 +266,33 @@ def train(args):
                     loss['1'] = torch.tensor(0)
 
                 if 'u' or 'i' in args.mode:
-                    scores_all = model.myparameters[0].mm(model.myparameters[1].t())
+                    # The above code is performing a matrix multiplication between two tensors:
+                    # `model.myparameters[0]` and the transpose of `model.myparameters[1]`. The
+                    # resulting tensor `scores_all` will contain the dot product of the two tensors.
+                    # This is a common operation in machine learning models, particularly in neural
+                    # networks, where the weights and biases of the model are represented as tensors
+                    # and need to be multiplied together to make predictions.
+                    #scores_all = model.myparameters[0].mm(model.myparameters[1].t())
+
+                    user_emb = model.myparameters[0].repeat_interleave(item_size, dim=0)
+                    #print(user_emb.shape)
+                    item_emb = model.myparameters[1].repeat(user_size,1)
+                    #print(item_emb.shape)
+                    vector = torch.cat((user_emb, item_emb), dim = 1)
+                    #print(vector.shape)
+
+                    activation = nn.ReLU()
+                    vector = activation(model.myparameters_2[0](vector))
+                    #print(vector.shape)
+                  
+
+                    # layer = nn.Linear(self.layers[idx])
+                        # vector = layer(vector)
+                    sigmoid = nn.Sigmoid()
+                    scores_all = sigmoid(model.myparameters_2[1](vector))
+                    scores_all  = torch.reshape(scores_all, (user_size, item_size))
+                    #print(scores_all.shape)
+                    
                     # scores_all[:,item_size] = -np.inf
                     scores = torch.gather(scores_all, 1, sampled_ids).to(args.device)
 
@@ -323,7 +382,7 @@ def train(args):
                     for i, t in enumerate(tasks):
                         scale[t] = float(sol[i])
                 else:
-                    scale = {'1': args.scale1, '2': 1.0 - args.scale1, '3': 1.0 - args.scale1}
+                    scale = {'1': args.scale1, '2': args.scale2, '3': args.scale3}
 
                 batch_loss = 0
                 for t in tasks:
@@ -350,6 +409,7 @@ def train(args):
                 # with open(saved_record_path, "w") as fp:
                 #     json.dump(loss_record, fp)
                 model.eval()
+                torch.save(model.state_dict(), '/weight/weight_rui_moop.pt')
                 pred_list, score_matrix, raw_score_matrix = generate_pred_list(model, train_val_matrix, topk=200)
                 precision, recall, MAP, ndcg = compute_metrics(test_user_list, pred_list, topk=20)
                 logger.info(', '.join(str(e) for e in precision))
